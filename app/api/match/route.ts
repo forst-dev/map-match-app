@@ -8,7 +8,7 @@ const MOCK_HEADERS = {
   'Referer': 'https://map.naver.com/'
 };
 
-// 단축 URL 해제 함수
+// 1. 단축 URL 해제
 async function resolveRedirect(url: string): Promise<string> {
   try {
     const response = await fetch(url, {
@@ -27,12 +27,35 @@ async function resolveRedirect(url: string): Promise<string> {
   }
 }
 
-// 네이버 지도 리스트 데이터 긁어오기
-async function fetchNaverMapList(listId: string): Promise<any[]> {
+// 2. [신형] 네이버 지도 마이폴더(favorite/myFolder) 데이터 긁어오기
+async function fetchNaverMyFolderList(folderId: string): Promise<any[]> {
+  try {
+    // 최신 네이버 지도 폴더 상세조회 내부 API 주소
+    const apiUrl = `https://map.naver.com/p/api/favorite/folder/${folderId}?lang=ko`;
+    const response = await fetch(apiUrl, { headers: MOCK_HEADERS });
+    if (!response.ok) return [];
+
+    const data = await response.json();
+    // 폴더 내에 저장된 장소 리스트 추출
+    const items = data.favorites || [];
+    
+    return items.map((item: any) => ({
+      name: item.name || item.title || '',
+      category: item.category || '장소',
+      address: item.address || item.roadAddress || '',
+      naverUrl: `https://map.naver.com/p/entry/place/${item.id || item.placeId}`
+    })).filter((item: any) => item.name !== '');
+  } catch (e) {
+    console.error('마이폴더 파싱 에러:', e);
+    return [];
+  }
+}
+
+// 3. [구형/공유용] 네이버 지도 북마크 쉐어 리스트 긁어오기
+async function fetchNaverBookmarkList(listId: string): Promise<any[]> {
   try {
     const apiUrl = `https://map.naver.com/v5/api/bookmark/share/${listId}`;
     const response = await fetch(apiUrl, { headers: MOCK_HEADERS });
-
     if (!response.ok) return [];
 
     const data = await response.json();
@@ -43,7 +66,7 @@ async function fetchNaverMapList(listId: string): Promise<any[]> {
       category: item.displayCategory || item.category || '장소',
       address: item.address || item.roadAddress || '',
       naverUrl: `https://map.naver.com/v5/entry/place/${item.id || item.placeId}`
-    })).filter((item: any) => item.name !== ''); // 이름 없는 데이터 제외
+    })).filter((item: any) => item.name !== '');
   } catch (e) {
     return [];
   }
@@ -57,31 +80,34 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: '최소 2개 이상의 링크를 입력해주세요.' }, { status: 400 });
     }
 
-    // 1. URL 해제
+    // URL 복원
     const resolvedUrls = await Promise.all(links.map(link => resolveRedirect(link.trim())));
     
-    // 2. ID 추출
-    const listIds = resolvedUrls.map(url => {
-      const match = url.match(/(?:bookmarkListId|shareRoleId)=([A-Za-z0-9_-]+)/) || url.match(/bookmark\/share\/([A-Za-z0-9_-]+)/);
-      return match ? match[1] : null;
-    });
+    // 데이터 로드 수행
+    const allListsResults = await Promise.all(resolvedUrls.map(async (url) => {
+      // 💡 [최신 핵심 타겟] 유저님이 보내주신 /favorite/myFolder/all/ID 패턴 매칭
+      const myFolderMatch = url.match(/myFolder\/[^\/]+\/([0-9]+)/) || url.match(/favorite\/folder\/([0-9]+)/);
+      if (myFolderMatch) {
+        return await fetchNaverMyFolderList(myFolderMatch[1]);
+      }
 
-    if (listIds.some(id => !id)) {
-      return NextResponse.json({ error: '올바른 네이버 지도 공유 리스트 링크가 포함되어 있지 않습니다.' }, { status: 400 });
+      // 기존 공유 리스트 패턴 매칭
+      const bookmarkMatch = url.match(/(?:bookmarkListId|shareRoleId)=([A-Za-z0-9_-]+)/) || url.match(/bookmark\/share\/([A-Za-z0-9_-]+)/);
+      if (bookmarkMatch) {
+        return await fetchNaverBookmarkList(bookmarkMatch[1]);
+      }
+
+      return [];
+    }));
+
+    // 하나라도 장소를 못 긁어왔다면 커트
+    if (allListsResults.some(list => list.length === 0)) {
+      return NextResponse.json({ 
+        error: '입력하신 공유 폴더에서 장소 목록을 읽어오지 못했습니다. 폴더가 [공개] 상태인지 확인해 주세요.' 
+      }, { status: 400 });
     }
 
-    // 3. 네이버 실제 데이터 로드
-    const allListsResults = await Promise.all(listIds.map(id => fetchNaverMapList(id!)));
-
-    // 💡 연결 실패 및 빈 리스트 방어벽
-    if (allListsResults[0].length === 0) {
-      return NextResponse.json({ error: '첫 번째 링크의 저장된 장소 데이터를 가져오지 못했습니다.' }, { status: 400 });
-    }
-    if (allListsResults[1].length === 0) {
-      return NextResponse.json({ error: '두 번째 링크의 저장된 장소 데이터를 가져오지 못했습니다.' }, { status: 400 });
-    }
-
-    // 4. 순수 교집합(공통 장소) 추출 (공백 제거 후 비교)
+    // 교집합 추출 (공백 제거 후 비교)
     const firstList = allListsResults[0];
     const restLists = allListsResults.slice(1);
 
@@ -91,7 +117,7 @@ export async function POST(req: NextRequest) {
       )
     );
 
-    // 5. 일치율 계산
+    // 일치율 계산
     const totalUniqueCount = new Set([...allListsResults.flat()].map(p => p.name)).size;
     const matchRate = totalUniqueCount > 0 ? Math.round((commonPlaces.length / totalUniqueCount) * 100) : 0;
 
@@ -102,6 +128,6 @@ export async function POST(req: NextRequest) {
     });
 
   } catch (error) {
-    return NextResponse.json({ error: '네이버 지도 서버와 통신 중 문제가 발생했습니다.' }, { status: 500 });
+    return NextResponse.json({ error: '서버 에러가 발생했습니다.' }, { status: 500 });
   }
 }
