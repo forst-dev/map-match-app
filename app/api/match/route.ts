@@ -27,16 +27,14 @@ async function resolveRedirect(url: string): Promise<string> {
   }
 }
 
-// 2. [신형] 네이버 지도 마이폴더(favorite/myFolder) 데이터 긁어오기
+// 2. [신형] 네이버 마이폴더 API 호출
 async function fetchNaverMyFolderList(folderId: string): Promise<any[]> {
   try {
-    // 최신 네이버 지도 폴더 상세조회 내부 API 주소
     const apiUrl = `https://map.naver.com/p/api/favorite/folder/${folderId}?lang=ko`;
     const response = await fetch(apiUrl, { headers: MOCK_HEADERS });
     if (!response.ok) return [];
 
     const data = await response.json();
-    // 폴더 내에 저장된 장소 리스트 추출
     const items = data.favorites || [];
     
     return items.map((item: any) => ({
@@ -51,7 +49,7 @@ async function fetchNaverMyFolderList(folderId: string): Promise<any[]> {
   }
 }
 
-// 3. [구형/공유용] 네이버 지도 북마크 쉐어 리스트 긁어오기
+// 3. [구형] 네이버 북마크 API 호출
 async function fetchNaverBookmarkList(listId: string): Promise<any[]> {
   try {
     const apiUrl = `https://map.naver.com/v5/api/bookmark/share/${listId}`;
@@ -85,25 +83,37 @@ export async function POST(req: NextRequest) {
     
     // 데이터 로드 수행
     const allListsResults = await Promise.all(resolvedUrls.map(async (url) => {
-      // 💡 [최신 핵심 타겟] 유저님이 보내주신 /favorite/myFolder/all/ID 패턴 매칭
-      const myFolderMatch = url.match(/myFolder\/[^\/]+\/([0-9]+)/) || url.match(/favorite\/folder\/([0-9]+)/);
-      if (myFolderMatch) {
-        return await fetchNaverMyFolderList(myFolderMatch[1]);
+      // 💡 [정규식 대공사] 주소창의 유동적인 패턴을 다 잡아내도록 수정
+      // 1순위: /myFolder/all/숫자 또는 /myFolder/폴더이름/숫자 포맷
+      // 2순위: /favorite/folder/숫자 포맷
+      const folderIdMatch = url.match(/myFolder\/[^\/]+\/([0-9]+)/) || 
+                            url.match(/favorite\/folder\/([0-9]+)/) ||
+                            url.match(/folder\/([0-9]+)/);
+                            
+      if (folderIdMatch && folderIdMatch[1]) {
+        return await fetchNaverMyFolderList(folderIdMatch[1]);
       }
 
-      // 기존 공유 리스트 패턴 매칭
+      // 구형 북마크 공유 포맷
       const bookmarkMatch = url.match(/(?:bookmarkListId|shareRoleId)=([A-Za-z0-9_-]+)/) || url.match(/bookmark\/share\/([A-Za-z0-9_-]+)/);
-      if (bookmarkMatch) {
+      if (bookmarkMatch && bookmarkMatch[1]) {
         return await fetchNaverBookmarkList(bookmarkMatch[1]);
       }
 
       return [];
     }));
 
+    // 어떤 링크가 실패했는지 디버깅용 로그 (Vercel 로그에서 확인 가능)
+    allListsResults.forEach((list, idx) => {
+      if (list.length === 0) {
+        console.error(`[MapMatch Error] ${idx + 1}번째 링크 파싱 실패 원본주소:`, resolvedUrls[idx]);
+      }
+    });
+
     // 하나라도 장소를 못 긁어왔다면 커트
     if (allListsResults.some(list => list.length === 0)) {
       return NextResponse.json({ 
-        error: '입력하신 공유 폴더에서 장소 목록을 읽어오지 못했습니다. 폴더가 [공개] 상태인지 확인해 주세요.' 
+        error: '입력하신 공유 폴더 주소에서 장소 ID를 유추하지 못했거나 빈 폴더입니다. 올바른 주소인지 확인해 주세요.' 
       }, { status: 400 });
     }
 
