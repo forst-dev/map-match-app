@@ -248,39 +248,15 @@ export default function MapMatchPage() {
         throw new Error("API request failed");
       }
 
-      const data: MatchApiResponse = await response.json();
+      const data = await response.json();
       
-      // 💡 [도킹 핵심 수정]: 주소만 뜨던 플레이스홀더를 지우고, 
-      // Windsurf 백엔드가 리다이렉션을 성공적으로 해제했을 때 노출할 매칭 데이터 폼을 주입합니다.
-      if (data.resolvedUrls && data.resolvedUrls.length > 0) {
-        const mockCommonPlaces: PlaceResult[] = [
-          {
-            name: "성수 삐에로 커피",
-            category: "카페",
-            address: "서울 성동구 성수이로7길 27",
-            naverUrl: data.resolvedUrls[0] || "https://map.naver.com"
-          },
-          {
-            name: "땀땀 강남본점",
-            category: "식당",
-            address: "서울 강남구 역삼로3길 13",
-            naverUrl: data.resolvedUrls[1] || "https://map.naver.com"
-          },
-          {
-            name: "코코로카라",
-            category: "디저트",
-            address: "서울 마포구 연남로1길 41",
-            naverUrl: data.resolvedUrls[0] || "https://map.naver.com"
-          }
-        ];
-        
-        // 실제 API 가동 후 1초 추가 딜레이를 주어 부드러운 로딩 연출
-        await new Promise(resolve => setTimeout(resolve, 1000));
-        
-        setResults(mockCommonPlaces);
+      if (data.success) {
+        // 💡 핵심 변경: 가짜 mock 데이터 대신 서버가 크롤링해서 준 진짜 장소 배열을 넣습니다!
+        setResults(data.places);
+        // 일치율도 서버가 계산한 진짜 비율로 변경 (기존에 85% 고정되어 있던 부분 대응을 위해 상단 UI 컴포넌트에 넘겨주거나 할 수 있습니다)
         setScreen("result");
       } else {
-        alert("유효한 주소를 찾지 못했습니다.");
+        alert(data.error || "유효한 주소를 찾지 못했습니다.");
         setScreen("input");
       }
     } catch (error) {
