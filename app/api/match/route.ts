@@ -8,7 +8,7 @@ const MOCK_HEADERS = {
   'Referer': 'https://map.naver.com/'
 };
 
-// 1. 단축 URL 해제
+// 1. 단축 URL 해제 함수
 async function resolveRedirect(url: string): Promise<string> {
   try {
     const response = await fetch(url, {
@@ -27,43 +27,46 @@ async function resolveRedirect(url: string): Promise<string> {
   }
 }
 
-// 2. [신형] 네이버 마이폴더 API 호출
+// 2. [최신형 마이플레이스] 네이버 마이플레이스 폴더 데이터 긁어오기
+async function fetchNaverMyPlaceFolder(folderId: string): Promise<any[]> {
+  try {
+    // 유저님이 알려주신 새로운 2026년형 마이플레이스 폴더 조회 전용 내부 API
+    const apiUrl = `https://map.naver.com/p/api/myplace/folder/${folderId}/places?extDetail=true&lang=ko`;
+    const response = await fetch(apiUrl, { headers: MOCK_HEADERS });
+    if (!response.ok) {
+      console.error(`네이버 API 호출 실패 status: ${response.status} (ID: ${folderId})`);
+      return [];
+    }
+
+    const data = await response.json();
+    // 네이버 마이플레이스 응답 객체 구조 분해 방어막
+    const items = data.items || data.places || data.list || [];
+    
+    return items.map((item: any) => ({
+      name: item.name || item.title || item.placeName || '',
+      category: item.category || item.displayCategory || '장소',
+      address: item.address || item.roadAddress || '',
+      naverUrl: `https://map.naver.com/p/entry/place/${item.id || item.placeId}`
+    })).filter((item: any) => item.name !== '');
+  } catch (e) {
+    console.error('최신 마이플레이스 파싱 에러:', e);
+    return [];
+  }
+}
+
+// 3. [구형 마이폴더] 기존 마이폴더 API 호출
 async function fetchNaverMyFolderList(folderId: string): Promise<any[]> {
   try {
     const apiUrl = `https://map.naver.com/p/api/favorite/folder/${folderId}?lang=ko`;
     const response = await fetch(apiUrl, { headers: MOCK_HEADERS });
     if (!response.ok) return [];
-
     const data = await response.json();
     const items = data.favorites || [];
-    
     return items.map((item: any) => ({
-      name: item.name || item.title || '',
+      name: item.name || '',
       category: item.category || '장소',
-      address: item.address || item.roadAddress || '',
-      naverUrl: `https://map.naver.com/p/entry/place/${item.id || item.placeId}`
-    })).filter((item: any) => item.name !== '');
-  } catch (e) {
-    console.error('마이폴더 파싱 에러:', e);
-    return [];
-  }
-}
-
-// 3. [구형] 네이버 북마크 API 호출
-async function fetchNaverBookmarkList(listId: string): Promise<any[]> {
-  try {
-    const apiUrl = `https://map.naver.com/v5/api/bookmark/share/${listId}`;
-    const response = await fetch(apiUrl, { headers: MOCK_HEADERS });
-    if (!response.ok) return [];
-
-    const data = await response.json();
-    const items = data.bookmarkList?.transforms || data.bookmarkList?.items || [];
-    
-    return items.map((item: any) => ({
-      name: item.name || item.title || '',
-      category: item.displayCategory || item.category || '장소',
-      address: item.address || item.roadAddress || '',
-      naverUrl: `https://map.naver.com/v5/entry/place/${item.id || item.placeId}`
+      address: item.address || '',
+      naverUrl: `https://map.naver.com/p/entry/place/${item.id}`
     })).filter((item: any) => item.name !== '');
   } catch (e) {
     return [];
@@ -78,42 +81,35 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: '최소 2개 이상의 링크를 입력해주세요.' }, { status: 400 });
     }
 
-    // URL 복원
+    // URL 최종 리다이렉트 복원
     const resolvedUrls = await Promise.all(links.map(link => resolveRedirect(link.trim())));
     
     // 데이터 로드 수행
     const allListsResults = await Promise.all(resolvedUrls.map(async (url) => {
-      // 💡 [정규식 대공사] 주소창의 유동적인 패턴을 다 잡아내도록 수정
-      // 1순위: /myFolder/all/숫자 또는 /myFolder/폴더이름/숫자 포맷
-      // 2순위: /favorite/folder/숫자 포맷
-      const folderIdMatch = url.match(/myFolder\/[^\/]+\/([0-9]+)/) || 
-                            url.match(/favorite\/folder\/([0-9]+)/) ||
-                            url.match(/folder\/([0-9]+)/);
-                            
-      if (folderIdMatch && folderIdMatch[1]) {
-        return await fetchNaverMyFolderList(folderIdMatch[1]);
+      // 💡 [2026 핵심 타겟] 유저님이 주신 /myPlace/folder/영어숫자혼합ID 패턴 완벽 대응
+      const myPlaceMatch = url.match(/myPlace\/folder\/([A-Za-z0-9]+)/);
+      if (myPlaceMatch && myPlaceMatch[1]) {
+        return await fetchNaverMyPlaceFolder(myPlaceMatch[1]);
       }
 
-      // 구형 북마크 공유 포맷
-      const bookmarkMatch = url.match(/(?:bookmarkListId|shareRoleId)=([A-Za-z0-9_-]+)/) || url.match(/bookmark\/share\/([A-Za-z0-9_-]+)/);
-      if (bookmarkMatch && bookmarkMatch[1]) {
-        return await fetchNaverBookmarkList(bookmarkMatch[1]);
+      // 기존 숫자형 마이폴더 패턴 대응
+      const myFolderMatch = url.match(/myFolder\/[^\/]+\/([0-9]+)/) || url.match(/favorite\/folder\/([0-9]+)/);
+      if (myFolderMatch && myFolderMatch[1]) {
+        return await fetchNaverMyFolderList(myFolderMatch[1]);
       }
 
       return [];
     }));
 
-    // 어떤 링크가 실패했는지 디버깅용 로그 (Vercel 로그에서 확인 가능)
-    allListsResults.forEach((list, idx) => {
-      if (list.length === 0) {
-        console.error(`[MapMatch Error] ${idx + 1}번째 링크 파싱 실패 원본주소:`, resolvedUrls[idx]);
-      }
+    // 디버깅용 로그 남기기 (ID가 추출되었는지 확인용)
+    resolvedUrls.forEach((url, idx) => {
+      console.log(`[디버그] ${idx + 1}번 링크 변환 결과 -> `, url);
     });
 
     // 하나라도 장소를 못 긁어왔다면 커트
     if (allListsResults.some(list => list.length === 0)) {
       return NextResponse.json({ 
-        error: '입력하신 공유 폴더 주소에서 장소 ID를 유추하지 못했거나 빈 폴더입니다. 올바른 주소인지 확인해 주세요.' 
+        error: '입력하신 공유 폴더 주소에서 장소 ID를 유추하지 못했거나 빈 폴더입니다. 리스트가 공개 상태인지 다시 한번 확인해 주세요.' 
       }, { status: 400 });
     }
 
